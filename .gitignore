@@ -1,0 +1,4 @@
+*.o
+dnsseed*
+dnsstats.log
+build/
