@@ -1,0 +1,150 @@
+name: Release
+
+# Mirrors the rest of the org: CHANGELOG.md is the version source of truth,
+# the workflow is dispatch-only, and it creates the tag itself. GoReleaser does
+# not apply here -- this is C++ -- so the artifacts are extracted from the same
+# buildx images that get published.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (bare, no leading v). Defaults to the topmost CHANGELOG.md heading."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  # Required to push the release image to ghcr.io.
+  packages: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Re-run the CI gate rather than trusting that main was green.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++ make libssl-dev libboost-dev
+
+      - name: Build
+        run: make
+
+      - name: Resolve version and notes from CHANGELOG.md
+        id: version
+        run: |
+          set -euo pipefail
+          INPUT="${{ inputs.version }}"
+          TOP=$(grep -m1 -oP '^## \[\K[^\]]+' CHANGELOG.md || true)
+          if [ -z "$TOP" ]; then
+            echo "::error::no '## [x.y.z]' heading found in CHANGELOG.md"
+            exit 1
+          fi
+          if [ "$TOP" = "Unreleased" ]; then
+            echo "::error::topmost CHANGELOG.md heading is '## [Unreleased]' - rename it to the version being released and commit that first"
+            exit 1
+          fi
+          VERSION="${INPUT:-$TOP}"
+          if [ "$VERSION" != "$TOP" ]; then
+            echo "::error::requested version '$VERSION' is not the topmost CHANGELOG.md heading ('$TOP')"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          awk -v v="$VERSION" '
+            $0 == "## [" v "]" { inside = 1; next }
+            inside && /^## \[/ { exit }
+            inside { print }
+          ' CHANGELOG.md > /tmp/notes.md
+          if [ ! -s /tmp/notes.md ]; then
+            echo "::error::CHANGELOG.md has no content under '## [$VERSION]'"
+            exit 1
+          fi
+          echo "Releasing $VERSION"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up QEMU
+        # Needed to build the linux/arm64 image on an amd64 runner.
+        uses: docker/setup-qemu-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Extract the binary per architecture from the same Dockerfile that
+      # produces the image, so the archives and the image are one build.
+      - name: Build release archives
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            docker buildx build \
+              --platform "linux/$arch" \
+              --target export \
+              --file Dockerfile.release \
+              --output "type=local,dest=out-$arch" \
+              .
+            install -m 0755 "out-$arch/dnsseed" "dist/dnsseed"
+            tar -C dist -czf "dist/flokicoin-seeder-linux-$arch-v$VERSION.tar.gz" dnsseed
+            rm -f dist/dnsseed
+          done
+          ( cd dist && sha256sum *.tar.gz > checksums.txt )
+          ls -l dist
+
+      - name: Build and push image
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          EXTRA=""
+          # A hyphen means a pre-release, which must never move :latest.
+          case "$VERSION" in
+            *-*) ;;
+            *) EXTRA="--tag ghcr.io/flokiorg/flokicoin-seeder:latest" ;;
+          esac
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --file Dockerfile.release \
+            --tag "ghcr.io/flokiorg/flokicoin-seeder:$VERSION" \
+            $EXTRA \
+            --label "org.opencontainers.image.version=$VERSION" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.source=https://github.com/flokiorg/flokicoin-seeder" \
+            --push \
+            .
+
+      - name: Tag release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Idempotent: a failed publish can be retried.
+          git tag -d "v$VERSION" 2>/dev/null || true
+          git push origin ":refs/tags/v$VERSION" 2>/dev/null || true
+          # --cleanup=verbatim, or every markdown heading in the notes is stripped.
+          git tag -a "v$VERSION" -F /tmp/notes.md --cleanup=verbatim
+          git push origin "refs/tags/v$VERSION"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          body_path: /tmp/notes.md
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt

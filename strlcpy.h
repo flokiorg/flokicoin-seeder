@@ -20,6 +20,25 @@
 #include <string.h>
 
 /*
+ * glibc 2.38 added strlcpy/strlcat to <string.h>, and the BSDs and macOS have
+ * always had them. Redeclaring them here as plain `inline` is an error on
+ * those platforms ("redeclared inline without 'gnu_inline' attribute"), so
+ * the fallback definitions below are only compiled where the system does not
+ * already provide them.
+ */
+#if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
+#  if __GLIBC_PREREQ(2, 38)
+#    define FLOKICOIN_HAVE_STRLCPY 1
+#  endif
+#endif
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
+    defined(__NetBSD__) || defined(__DragonFly__)
+#  define FLOKICOIN_HAVE_STRLCPY 1
+#endif
+
+#ifndef FLOKICOIN_HAVE_STRLCPY
+
+/*
  * Copy src to string dst of size siz.  At most siz-1 characters
  * will be copied.  Always NUL terminates (unless siz == 0).
  * Returns strlen(src); if retval >= siz, truncation occurred.
@@ -87,4 +106,5 @@ inline size_t strlcat(char *dst, const char *src, size_t siz)
 
     return(dlen + (s - src)); /* count does not include NUL */
 }
+#endif /* FLOKICOIN_HAVE_STRLCPY */
 #endif
