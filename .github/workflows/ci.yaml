@@ -31,7 +31,7 @@ jobs:
           test -x build/dnsseed
           file build/dnsseed
           ldd build/dnsseed
-          if grep -q 'march=native' Makefile; then
+          if grep -qE '^[^#]*-march=native' Makefile; then
             echo "::error::-march=native is back in the Makefile; released binaries would not be portable"
             exit 1
           fi
