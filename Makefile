@@ -1,4 +1,7 @@
-CXXFLAGS = -O3 -g0 -march=native
+# -march=native was removed deliberately: it tunes the binary for whatever CPU
+# happened to build it, so a release artifact built on a modern runner crashes
+# with SIGILL on older hardware. Override CXXFLAGS locally if you want it.
+CXXFLAGS ?= -O3 -g0
 LDFLAGS = $(CXXFLAGS)
 
 # Define build directory
