@@ -1,0 +1,36 @@
+# Builds the seeder from source for whatever platform buildx targets.
+#
+# Two things come out of this file. The `export` stage is a scratch image
+# holding just the binary, which the release workflow extracts per-architecture
+# to produce the published archives. The final stage is the runtime image. Both
+# come from the same compile, so a published archive and the published image
+# are never different builds.
+
+FROM debian:bookworm-slim AS build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends g++ make libssl-dev libboost-dev \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . /src
+# -march=native is deliberately not reintroduced here: the image has to run on
+# hardware other than the builder's.
+RUN make clean >/dev/null 2>&1 || true
+RUN make
+
+# Scratch stage used only as an extraction target by the release workflow.
+FROM scratch AS export
+COPY --from=build /src/build/dnsseed /dnsseed
+
+FROM debian:bookworm-slim
+# The binary links libcrypto dynamically, and the seeder resolves DNS, so it
+# needs the CA bundle too.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libssl3 ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/build/dnsseed /usr/local/bin/dnsseed
+
+# DNS, which is the point of this service.
+EXPOSE 53/udp
+EXPOSE 53/tcp
+
+ENTRYPOINT ["/usr/local/bin/dnsseed"]
