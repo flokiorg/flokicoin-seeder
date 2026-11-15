@@ -1,0 +1,37 @@
+name: CI
+
+# The build broke silently against glibc 2.38 and nobody noticed because
+# nothing built it. This is that guard.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++ make libssl-dev libboost-dev
+
+      - name: Build
+        run: make
+
+      - name: Confirm the binary links and is not CPU-tuned
+        run: |
+          test -x build/dnsseed
+          file build/dnsseed
+          ldd build/dnsseed
+          if grep -qE '^[^#]*-march=native' Makefile; then
+            echo "::error::-march=native is back in the Makefile; released binaries would not be portable"
+            exit 1
+          fi
